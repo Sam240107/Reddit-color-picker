@@ -1,0 +1,6 @@
+{
+  "name": "Daily Color Puzzle",
+  "description": "A daily color puzzle game styled for Reddit Devvit Web using Phaser 3 and React. Guess the target RGB color in 5 tries, build your daily streak, and compete on the global leaderboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
