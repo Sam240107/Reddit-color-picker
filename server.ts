@@ -19,6 +19,7 @@ interface LeaderboardEntry {
   streak: number;
   badge: "Gold" | "Silver" | "Bronze" | "Iron" | "";
   date: string;
+  timeSeconds?: number;
 }
 
 interface CommentEntry {
@@ -98,6 +99,72 @@ function getDailyColor(dateStr: string) {
   return { r, g, b };
 }
 
+function rgbToHsv(r: number, g: number, b: number) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const v = max;
+
+  const d = max - min;
+  s = max === 0 ? 0 : d / max;
+
+  if (max !== min) {
+    switch (max) {
+      case r:
+        h = (g - b) / d + (g < b ? 6 : 0);
+        break;
+      case g:
+        h = (b - r) / d + 2;
+        break;
+      case b:
+        h = (r - g) / d + 4;
+        break;
+    }
+    h /= 6;
+  }
+
+  return { h: h * 360, s, v };
+}
+
+function hsvToRgb(h: number, s: number, v: number) {
+  h /= 360;
+  let r = 0, g = 0, b = 0;
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    case 5: r = v; g = p; b = q; break;
+  }
+  return {
+    r: Math.round(r * 255),
+    g: Math.round(g * 255),
+    b: Math.round(b * 255)
+  };
+}
+
+function normalizeColorForMode(color: {r: number, g: number, b: number}, mode: string) {
+  const hsv = rgbToHsv(color.r, color.g, color.b);
+  if (mode === "saturation") {
+    // Lock Value to 1.0 (fully bright) but keep Hue and Saturation
+    return hsvToRgb(hsv.h, hsv.s, 1.0);
+  } else {
+    // Lock Saturation to 1.0 and Value to 1.0
+    return hsvToRgb(hsv.h, 1.0, 1.0);
+  }
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json());
@@ -125,8 +192,14 @@ async function startServer() {
       displayLeaderboard = db.leaderboard; // Fallback to all entries
     }
 
-    // Sort leaderboard desc
-    displayLeaderboard.sort((a, b) => b.points - a.points || a.guesses - b.guesses);
+    // Sort leaderboard desc (higher points, then lower time, then fewer guesses)
+    displayLeaderboard.sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      const tA = a.timeSeconds !== undefined ? a.timeSeconds : 999999;
+      const tB = b.timeSeconds !== undefined ? b.timeSeconds : 999999;
+      if (tA !== tB) return tA - tB;
+      return a.guesses - b.guesses;
+    });
 
     res.json({
       date: today,
@@ -137,29 +210,64 @@ async function startServer() {
     });
   });
 
+  // API to fetch target color coordinates for a specific seed/game
+  app.get("/api/target-color", (req, res) => {
+    const seed = (req.query.seed as string) || getTodayUTCString();
+    const baseTarget = getDailyColor(seed);
+    
+    // Parse mode from seed
+    let mode = "hue";
+    if (seed.includes("saturation")) mode = "saturation";
+    else if (seed.includes("complementary")) mode = "complementary";
+    else if (seed.includes("analogous")) mode = "analogous";
+    else if (seed.includes("triadic")) mode = "triadic";
+
+    const target = normalizeColorForMode(baseTarget, mode);
+    res.json({ targetColor: target });
+  });
+
   // API 2: Secure guess evaluation
   app.post("/api/guess", (req, res) => {
-    const { r, g, b, guessesCount } = req.body;
+    const { r, g, b, guessesCount, seed, maxGuesses } = req.body;
     if (typeof r !== "number" || typeof g !== "number" || typeof b !== "number") {
       return res.status(400).json({ error: "Invalid color coordinates" });
     }
 
     const today = getTodayUTCString();
-    const target = getDailyColor(today);
+    const activeSeed = seed || today;
+    const baseTarget = getDailyColor(activeSeed);
 
-    // Euclidean distance in RGB
-    const dr = r - target.r;
-    const dg = g - target.g;
-    const db = b - target.b;
+    // Determine mode
+    let mode = req.body.gameMode;
+    if (!mode && typeof activeSeed === "string") {
+      if (activeSeed.includes("saturation")) mode = "saturation";
+      else if (activeSeed.includes("complementary")) mode = "complementary";
+      else if (activeSeed.includes("analogous")) mode = "analogous";
+      else if (activeSeed.includes("triadic")) mode = "triadic";
+    }
+    if (!mode) mode = "hue";
+
+    // Normalize both player's guess coordinates and the target color coordinate for the specific mode
+    const userGuess = normalizeColorForMode({ r, g, b }, mode);
+    const target = normalizeColorForMode(baseTarget, mode);
+
+    // Euclidean distance in RGB on normalized modes
+    const dr = userGuess.r - target.r;
+    const dg = userGuess.g - target.g;
+    const db = userGuess.b - target.b;
     const distance = Math.sqrt(dr * dr + dg * dg + db * db);
 
     // Max distance is sqrt(255^2 * 3) = ~441.67
-    const maxDist = Math.sqrt(255 * 255 * 3);
-    const closeness = Math.max(0, Number((100 - (distance / maxDist) * 100).toFixed(1)));
+    const maxDist = 441.67;
+    let closeness = Math.max(0, Number((100 - (distance / maxDist) * 100).toFixed(1)));
+    if (closeness >= 99.0) {
+      closeness = 100.0;
+    }
     
-    // We count matching if closeness is extremely high (e.g. >= 99.5% or distance < 4)
-    const isCorrect = distance < 4;
-    const isGameOver = isCorrect || guessesCount >= 4; // guessesCount is 0-indexed, so 4 means 5th guess
+    // Generous bounding for a match
+    const isCorrect = distance < 8;
+    const limit = typeof maxGuesses === "number" ? maxGuesses : 3;
+    const isGameOver = isCorrect || guessesCount >= (limit - 1);
 
     res.json({
       distance: Math.round(distance),
@@ -173,14 +281,16 @@ async function startServer() {
 
   // API 3: Submit high score
   app.post("/api/submit-score", (req, res) => {
-    const { username, closeness, guesses, streak } = req.body;
+    const { username, closeness, guesses, streak, timeSeconds } = req.body;
     if (!username || typeof closeness !== "number" || typeof guesses !== "number") {
       return res.status(400).json({ error: "Missing required parameters" });
     }
 
     const cleanUsername = username.trim().startsWith("u/") ? username.trim() : `u/${username.trim()}`;
     const today = getTodayUTCString();
-    const points = Math.round(closeness * 100); // 10000 max score
+    
+    // Calculate final points: average closeness * 100, capped at 10000
+    const points = Math.round(closeness * 100); 
 
     const db = readDB();
     
@@ -196,12 +306,18 @@ async function startServer() {
       points,
       streak: streak || 1,
       badge: "",
-      date: today
+      date: today,
+      timeSeconds: typeof timeSeconds === "number" ? timeSeconds : undefined
     };
 
     if (existingIndex !== -1) {
-      // Keep best points
-      if (points > db.leaderboard[existingIndex].points) {
+      // Keep best points (or faster time if points are identical)
+      const currentBest = db.leaderboard[existingIndex];
+      const isNewBetter = points > currentBest.points || 
+        (points === currentBest.points && 
+         (timeSeconds !== undefined && (currentBest.timeSeconds === undefined || timeSeconds < currentBest.timeSeconds)));
+      
+      if (isNewBetter) {
         db.leaderboard[existingIndex] = newEntry;
       }
     } else {
@@ -210,7 +326,13 @@ async function startServer() {
 
     // Recalculate badges for today
     const todaysScores = db.leaderboard.filter(e => e.date === today);
-    todaysScores.sort((a, b) => b.points - a.points || a.guesses - b.guesses);
+    todaysScores.sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      const tA = a.timeSeconds !== undefined ? a.timeSeconds : 999999;
+      const tB = b.timeSeconds !== undefined ? b.timeSeconds : 999999;
+      if (tA !== tB) return tA - tB;
+      return a.guesses - b.guesses;
+    });
     
     todaysScores.forEach((entry, idx) => {
       if (idx === 0) entry.badge = "Gold";
@@ -222,9 +344,18 @@ async function startServer() {
 
     writeDB(db);
 
+    const filteredBoard = db.leaderboard.filter(e => e.date === today);
+    filteredBoard.sort((a, b) => {
+      if (b.points !== a.points) return b.points - a.points;
+      const tA = a.timeSeconds !== undefined ? a.timeSeconds : 999999;
+      const tB = b.timeSeconds !== undefined ? b.timeSeconds : 999999;
+      if (tA !== tB) return tA - tB;
+      return a.guesses - b.guesses;
+    });
+
     res.json({
       success: true,
-      leaderboard: db.leaderboard.filter(e => e.date === today).slice(0, 10)
+      leaderboard: filteredBoard.slice(0, 10)
     });
   });
 

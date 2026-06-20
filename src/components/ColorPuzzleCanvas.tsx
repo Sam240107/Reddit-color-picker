@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import Phaser from "phaser";
-import { RGB, GuessResult } from "../types";
+import { RGB, GuessResult, GameMode } from "../types";
 import { playSound } from "../utils/audio";
 
 interface ColorPuzzleCanvasProps {
@@ -11,6 +11,7 @@ interface ColorPuzzleCanvasProps {
   currentR: number;
   currentG: number;
   currentB: number;
+  gameMode: GameMode;
   onColorChange: (r: number, g: number, b: number) => void;
   onGuessSubmitted: () => void;
   isSoundEnabled: boolean;
@@ -24,6 +25,7 @@ export default function ColorPuzzleCanvas({
   currentR,
   currentG,
   currentB,
+  gameMode,
   onColorChange,
   onGuessSubmitted,
   isSoundEnabled,
@@ -39,6 +41,7 @@ export default function ColorPuzzleCanvas({
     currentR,
     currentG,
     currentB,
+    gameMode,
     onColorChange,
     onGuessSubmitted,
     maxGuesses,
@@ -52,32 +55,23 @@ export default function ColorPuzzleCanvas({
       currentR,
       currentG,
       currentB,
+      gameMode,
       onColorChange,
       onGuessSubmitted,
       maxGuesses,
     };
-  }, [guesses, isGameOver, targetColor, currentR, currentG, currentB, onColorChange, onGuessSubmitted, maxGuesses]);
+  }, [guesses, isGameOver, targetColor, currentR, currentG, currentB, gameMode, onColorChange, onGuessSubmitted, maxGuesses]);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     // Custom Phaser Scene inside React
     class ColorPuzzleScene extends Phaser.Scene {
-      private redHandle!: Phaser.GameObjects.Arc;
-      private greenHandle!: Phaser.GameObjects.Arc;
-      private blueHandle!: Phaser.GameObjects.Arc;
+      private wheelGraphics!: Phaser.GameObjects.Graphics;
+      private centerDisk!: Phaser.GameObjects.Graphics;
       
-      private redTrack!: Phaser.GameObjects.Graphics;
-      private greenTrack!: Phaser.GameObjects.Graphics;
-      private blueTrack!: Phaser.GameObjects.Graphics;
-
-      private rText!: Phaser.GameObjects.Text;
-      private gText!: Phaser.GameObjects.Text;
-      private bText!: Phaser.GameObjects.Text;
-
-      private guessSwatch!: Phaser.GameObjects.Graphics;
-      private targetSwatch!: Phaser.GameObjects.Graphics;
-      private targetQuestionMark!: Phaser.GameObjects.Text;
+      private handles!: Phaser.GameObjects.Arc[];
+      private targetMarkers!: Phaser.GameObjects.Arc[];
 
       private distanceMeterFill!: Phaser.GameObjects.Graphics;
       private distanceMeterCursor!: Phaser.GameObjects.Arc;
@@ -92,12 +86,15 @@ export default function ColorPuzzleCanvas({
       private particleEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
       private isFullyCreated = false;
 
+      private currentHue = 180;
+      private currentSat = 1.0;
+
       constructor() {
         super("ColorPuzzleScene");
       }
 
       create() {
-        const { currentR, currentG, currentB } = propsRef.current;
+        const { currentR, currentG, currentB, gameMode } = propsRef.current;
 
         // Draw Dark Sleek Card-like Canvas Background
         const bg = this.add.graphics();
@@ -107,100 +104,41 @@ export default function ColorPuzzleCanvas({
         bg.lineStyle(1, 0x1a1a1b, 1); // Dark Border
         bg.strokeRoundedRect(0, 0, 560, 480, 16);
 
-        // 1. SWATCHES / VISUALS HEADER
-        // Target Swatch (Glows & Reveals slowly)
-        this.targetSwatch = this.add.graphics();
+        // Graphics container for drawing the custom Color Wheel
+        this.wheelGraphics = this.add.graphics();
 
-        this.add.text(50, 130, "TARGET COLOR", {
-          fontSize: "10px",
+        // 1. SPLIT DISK & HOVER MARKERS
+        this.centerDisk = this.add.graphics();
+
+        // 2. POINTERS / TARGETS SETUP (MIMICKING COLOR.METHOD.AC)
+        this.handles = [];
+        for (let i = 0; i < 4; i++) {
+          const handle = this.add.arc(0, 0, 12, 0, 360, false, 0xffffff);
+          handle.setStrokeStyle(3, 0xffffff);
+          handle.setVisible(false);
+          this.handles.push(handle);
+        }
+
+        // Make primary handle interactive and draggable
+        const primaryHandle = this.handles[0];
+        primaryHandle.setInteractive({ useHandCursor: true });
+        this.input.setDraggable(primaryHandle);
+
+        this.targetMarkers = [];
+        for (let i = 0; i < 4; i++) {
+          const marker = this.add.arc(0, 0, 8, 0, 360, false);
+          marker.setStrokeStyle(2.5, 0xffffff, 0.5);
+          marker.setVisible(false);
+          this.targetMarkers.push(marker);
+        }
+
+        // Center wheel label guides for user understanding
+        this.add.text(280, 275, "COLOR WHEEL MATCH", {
+          fontSize: "9px",
           fontFamily: "Space Grotesk, sans-serif",
-          color: "#94a3b8",
+          color: "#4b5563",
           fontStyle: "bold",
         }).setOrigin(0.5);
-
-        // Question mark when hidden
-        this.targetQuestionMark = this.add.text(50, 75, "?", {
-          fontSize: "36px",
-          fontFamily: "Space Grotesk, sans-serif",
-          color: "#cbd5e1",
-          fontStyle: "bold",
-        }).setOrigin(0.5);
-
-        // VS connecting wire
-        const vsLabel = this.add.text(145, 75, "vs", {
-          fontSize: "14px",
-          fontFamily: "JetBrains Mono, monospace",
-          color: "#4a4a52",
-        }).setOrigin(0.5);
-
-        // Player's Swatch matches current slider values
-        this.guessSwatch = this.add.graphics();
-        this.drawGuessSwatch(currentR, currentG, currentB);
-
-        this.add.text(240, 130, "YOUR MIX", {
-          fontSize: "10px",
-          fontFamily: "Space Grotesk, sans-serif",
-          color: "#ff4500",
-          fontStyle: "bold",
-        }).setOrigin(0.5);
-
-        // 2. SLIDERS LABELS & SLIDER TRACK SECTIONS
-        // Slider coordinates
-        const sliderStartX = 80;
-        const sliderWidth = 320;
-        const redY = 195;
-        const greenY = 245;
-        const blueY = 295;
-
-        // RED slider track
-        this.redTrack = this.add.graphics();
-        this.drawSliderTrack(this.redTrack, sliderStartX, sliderWidth, redY, 0xff0000);
-
-        // GREEN slider track
-        this.greenTrack = this.add.graphics();
-        this.drawSliderTrack(this.greenTrack, sliderStartX, sliderWidth, greenY, 0x00ff00);
-
-        // BLUE slider track
-        this.blueTrack = this.add.graphics();
-        this.drawSliderTrack(this.blueTrack, sliderStartX, sliderWidth, blueY, 0x0000ff);
-
-        // RED handle
-        const redInitialX = sliderStartX + (currentR / 255) * sliderWidth;
-        this.redHandle = this.add.arc(redInitialX, redY, 14, 0, 360, false, 0xef4444);
-        this.redHandle.setStrokeStyle(3, 0xffffff);
-        this.redHandle.setInteractive({ useHandCursor: true });
-        this.input.setDraggable(this.redHandle);
-
-        // GREEN handle
-        const greenInitialX = sliderStartX + (currentG / 255) * sliderWidth;
-        this.greenHandle = this.add.arc(greenInitialX, greenY, 14, 0, 360, false, 0x10b981);
-        this.greenHandle.setStrokeStyle(3, 0xffffff);
-        this.greenHandle.setInteractive({ useHandCursor: true });
-        this.input.setDraggable(this.greenHandle);
-
-        // BLUE handle
-        const blueInitialX = sliderStartX + (currentB / 255) * sliderWidth;
-        this.blueHandle = this.add.arc(blueInitialX, blueY, 14, 0, 360, false, 0x3b82f6);
-        this.blueHandle.setStrokeStyle(3, 0xffffff);
-        this.blueHandle.setInteractive({ useHandCursor: true });
-        this.input.setDraggable(this.blueHandle);
-
-        // RGB Numeric Displays (R: 255, G: 0, etc.)
-        this.rText = this.add.text(450, redY - 8, `R: ${currentR}`, {
-          fontSize: "14px",
-          fontFamily: "JetBrains Mono, monospace",
-          color: "#ef4444",
-        });
-        this.gText = this.add.text(450, greenY - 8, `G: ${currentG}`, {
-          fontSize: "14px",
-          fontFamily: "JetBrains Mono, monospace",
-          color: "#10b981",
-        });
-        this.bText = this.add.text(450, blueY - 8, `B: ${currentB}`, {
-          fontSize: "14px",
-          fontFamily: "JetBrains Mono, monospace",
-          color: "#3b82f6",
-        });
 
         // 3. DISTANCE CLONES METER
         // Background Bar
@@ -216,7 +154,7 @@ export default function ColorPuzzleCanvas({
         this.distanceMeterCursor.setStrokeStyle(2, 0x09090b);
         this.distanceMeterCursor.setVisible(false);
 
-        this.distanceLabel = this.add.text(280, 375, "Submit a guess to trigger the sensor", {
+        this.distanceLabel = this.add.text(280, 375, "Submit a guess to trigger the accuracy sensor", {
           fontSize: "12px",
           fontFamily: "Space Grotesk, sans-serif",
           color: "#64748b",
@@ -225,8 +163,8 @@ export default function ColorPuzzleCanvas({
 
         // 4. SUBMIT BUTTON
         this.submitBtnBg = this.add.graphics();
-        this.submitBtnText = this.add.text(430, 75, "SUBMIT GUESS", {
-          fontSize: "14px",
+        this.submitBtnText = this.add.text(490, 75, "SUBMIT", {
+          fontSize: "13px",
           fontFamily: "Space Grotesk, sans-serif",
           color: "#ffffff",
           fontStyle: "bold",
@@ -235,7 +173,7 @@ export default function ColorPuzzleCanvas({
         this.drawSubmitButton(false); // Idle status
         
         // Make submit button interactive
-        const submitZone = this.add.zone(430, 75, 190, 60).setInteractive({ useHandCursor: true });
+        const submitZone = this.add.zone(490, 75, 120, 50).setInteractive({ useHandCursor: true });
         
         submitZone.on("pointerover", () => {
           if (propsRef.current.isGameOver) return;
@@ -277,56 +215,86 @@ export default function ColorPuzzleCanvas({
           emitting: false,
         });
 
-        // Drag handlers list
-        this.input.on("drag", (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.Arc, dragX: number) => {
+        // 6. DETAILED DRAG ALONG COLOR WHEEL
+        const centerX = 280;
+        const centerY = 190;
+
+        this.input.on("drag", (pointer: Phaser.Input.Pointer, gameObject: Phaser.GameObjects.Arc, dragX: number, dragY: number) => {
           if (propsRef.current.isGameOver) return;
 
-          // Confine X
-          const clampedX = Phaser.Math.Clamp(dragX, sliderStartX, sliderStartX + sliderWidth);
-          gameObject.x = clampedX;
+          const dx = dragX - centerX;
+          const dy = dragY - centerY;
+          let angleRad = Math.atan2(dy, dx);
+          if (angleRad < 0) angleRad += 2 * Math.PI;
+          const angleDeg = Phaser.Math.RadToDeg(angleRad);
+          const dist = Math.sqrt(dx * dx + dy * dy);
 
-          // Retrieve ratio
-          const ratio = (clampedX - sliderStartX) / sliderWidth;
-          const val = Math.round(ratio * 255);
+          const { gameMode: activeMode } = propsRef.current;
 
-          // Update colors
-          let { currentR: r, currentG: g, currentB: b } = propsRef.current;
-          if (gameObject === this.redHandle) {
-            r = val;
-            this.rText.setText(`R: ${r}`);
-          } else if (gameObject === this.greenHandle) {
-            g = val;
-            this.gText.setText(`G: ${g}`);
-          } else if (gameObject === this.blueHandle) {
-            b = val;
-            this.bText.setText(`B: ${b}`);
+          if (activeMode === "saturation") {
+            const rClamped = Phaser.Math.Clamp(dist, 60, 135);
+            this.currentHue = angleDeg;
+            this.currentSat = (rClamped - 60) / (135 - 60);
+          } else {
+            this.currentHue = angleDeg;
+            this.currentSat = 1.0;
           }
 
-          // Trigger React callback
-          propsRef.current.onColorChange(r, g, b);
+          // Update main handle positions synchronously
+          const rad = Phaser.Math.DegToRad(this.currentHue);
+          const actualR = activeMode === "saturation" ? (60 + this.currentSat * (135 - 60)) : 120;
+          gameObject.x = centerX + Math.cos(rad) * actualR;
+          gameObject.y = centerY + Math.sin(rad) * actualR;
 
-          // Redraw guess swatch in real-time
-          this.drawGuessSwatch(r, g, b);
+          // Compute matching RGB
+          const rgb = Phaser.Display.Color.HSVToRGB(this.currentHue / 360, this.currentSat, 1) as any;
+          propsRef.current.onColorChange(rgb.r, rgb.g, rgb.b);
 
-          if (pointer.primaryDown && Math.random() < 0.15) {
+          if (pointer.primaryDown && Math.random() < 0.1) {
             playSound("slide");
           }
         });
 
-        // Resolve Initial state if already set
         this.isFullyCreated = true;
         this.updateGameStateVisuals(true);
       }
 
-      drawSliderTrack(graphics: Phaser.GameObjects.Graphics, startX: number, width: number, y: number, color: number) {
-        graphics.clear();
-        // Sliders are multi-layered: dark background track and bright filled portion
-        graphics.fillStyle(0x1a1a1b, 1);
-        graphics.fillRoundedRect(startX, y - 6, width, 12, 6);
-        
-        // Border outline
-        graphics.lineStyle(1, 0x1a1a1b, 1);
-        graphics.strokeRoundedRect(startX, y - 6, width, 12, 6);
+      drawColorWheel(mode: GameMode) {
+        this.wheelGraphics.clear();
+        const centerX = 280;
+        const centerY = 190;
+        const innerRadius = 105;
+        const outerRadius = 135;
+
+        // Draw Continuous Rainbow Ring Segment (360 slices)
+        for (let deg = 0; deg < 360; deg += 1) {
+          const rad = Phaser.Math.DegToRad(deg);
+          const color = Phaser.Display.Color.HSVToRGB(deg / 360, 1, 1);
+          this.wheelGraphics.lineStyle(4, color.color, 1);
+          this.wheelGraphics.lineBetween(
+            centerX + Math.cos(rad) * innerRadius,
+            centerY + Math.sin(rad) * innerRadius,
+            centerX + Math.cos(rad) * outerRadius,
+            centerY + Math.sin(rad) * outerRadius
+          );
+        }
+
+        // Draw dynamic saturation gradient layering
+        if (mode === "saturation") {
+          for (let r = 60; r <= 135; r += 2) {
+            const alpha = Phaser.Math.Linear(0.85, 0, (r - 60) / (135 - 60));
+            this.wheelGraphics.lineStyle(2, 0xffffff, alpha);
+            this.wheelGraphics.strokeCircle(centerX, centerY, r);
+          }
+        }
+
+        // Sleek outer contour dividers
+        this.wheelGraphics.lineStyle(1.5, 0x1a1a1b, 1);
+        this.wheelGraphics.strokeCircle(centerX, centerY, innerRadius);
+        this.wheelGraphics.strokeCircle(centerX, centerY, outerRadius);
+        if (mode === "saturation") {
+          this.wheelGraphics.strokeCircle(centerX, centerY, 60);
+        }
       }
 
       drawSubmitButton(isHover: boolean) {
@@ -336,8 +304,8 @@ export default function ColorPuzzleCanvas({
         if (isOver) {
           // Disabled/Over button state
           this.submitBtnBg.fillStyle(0x1a1a1b, 1);
-          this.submitBtnBg.fillRoundedRect(330, 45, 200, 60, 12);
-          this.submitBtnText.setText("COMPLETED");
+          this.submitBtnBg.fillRoundedRect(430, 45, 110, 60, 12);
+          this.submitBtnText.setText("DONE");
           this.submitBtnText.setColor("#6b7280");
           return;
         }
@@ -345,54 +313,16 @@ export default function ColorPuzzleCanvas({
         // Active State - Reddit orange-red colors
         const primaryColor = isHover ? 0xd03800 : 0xff4500; // Hover vs Active orange-red
         this.submitBtnBg.fillStyle(primaryColor, 1);
-        this.submitBtnBg.fillRoundedRect(330, 45, 200, 60, 12);
+        this.submitBtnBg.fillRoundedRect(430, 45, 110, 60, 12);
         
-        // Elegant shadow border
         this.submitBtnBg.lineStyle(2, 0xff4500, 1);
-        this.submitBtnBg.strokeRoundedRect(330, 45, 200, 60, 12);
+        this.submitBtnBg.strokeRoundedRect(430, 45, 110, 60, 12);
 
-        this.submitBtnText.setText("SUBMIT GUESS");
+        this.submitBtnText.setText("SUBMIT");
         this.submitBtnText.setColor("#ffffff");
       }
 
-      drawGuessSwatch(r: number, g: number, b: number) {
-        this.guessSwatch.clear();
-        
-        // Inner fill
-        this.guessSwatch.fillStyle(Phaser.Display.Color.GetColor(r, g, b), 1);
-        this.guessSwatch.fillCircle(240, 75, 40);
-
-        // Ring Border
-        this.guessSwatch.lineStyle(3, 0xff4500, 1);
-        this.guessSwatch.strokeCircle(240, 75, 40);
-      }
-
-      drawTargetSwatch() {
-        this.targetSwatch.clear();
-        const { isGameOver, targetColor } = propsRef.current;
-
-        if (isGameOver && targetColor) {
-          this.targetSwatch.fillStyle(Phaser.Display.Color.GetColor(targetColor.r, targetColor.g, targetColor.b), 1);
-          this.targetSwatch.fillCircle(50, 75, 40);
-          this.targetSwatch.lineStyle(3, 0xffaa00, 1); // Orange reveal border
-          this.targetSwatch.strokeCircle(50, 75, 40);
-          if (this.targetQuestionMark) {
-            this.targetQuestionMark.setVisible(false);
-          }
-        } else {
-          // Locked State
-          this.targetSwatch.fillStyle(0x1a1a1b, 1); // Dark Card element
-          this.targetSwatch.fillCircle(50, 75, 40);
-          this.targetSwatch.lineStyle(3, 0x1a1a1b, 1); // Border Slate/Dark Gray
-          this.targetSwatch.strokeCircle(50, 75, 40);
-          if (this.targetQuestionMark) {
-            this.targetQuestionMark.setVisible(true);
-          }
-        }
-      }
-
       setUpHistoryChips() {
-        // Clear old graphics
         this.swatchCircles.forEach(c => c.destroy());
         this.swatchTexts.forEach(t => t.destroy());
         this.swatchCircles = [];
@@ -432,22 +362,132 @@ export default function ColorPuzzleCanvas({
 
       updateGameStateVisuals(isInitial = false) {
         if (!this.isFullyCreated) return;
-        const { guesses, isGameOver, targetColor, currentR, currentG, currentB } = propsRef.current;
+        const { guesses, isGameOver, targetColor, currentR, currentG, currentB, gameMode } = propsRef.current;
 
-        // Sync slider handles if they differ due to external changes (like resetting/starting today)
-        const sliderStartX = 80;
-        const sliderWidth = 320;
+        const centerX = 280;
+        const centerY = 190;
+
+        // Redraw color wheel and desaturation gradient
+        this.drawColorWheel(gameMode);
+
+        // Convert state back to target HSV & player HSV
+        const hsv = Phaser.Display.Color.RGBToHSV(currentR, currentG, currentB);
+        this.currentHue = hsv.h * 360;
+        this.currentSat = hsv.s;
+
+        // Update main handle position and display color
+        const mainRad = Phaser.Math.DegToRad(this.currentHue);
+        const mainR = gameMode === "saturation" ? (60 + this.currentSat * (135 - 60)) : 120;
         
-        this.redHandle.x = sliderStartX + (currentR / 255) * sliderWidth;
-        this.greenHandle.x = sliderStartX + (currentG / 255) * sliderWidth;
-        this.blueHandle.x = sliderStartX + (currentB / 255) * sliderWidth;
+        this.handles[0].x = centerX + Math.cos(mainRad) * mainR;
+        this.handles[0].y = centerY + Math.sin(mainRad) * mainR;
+        this.handles[0].setFillStyle(Phaser.Display.Color.HSVToRGB(hsv.h, hsv.s, 1).color, 1);
+        this.handles[0].setVisible(true);
 
-        this.rText.setText(`R: ${currentR}`);
-        this.gText.setText(`G: ${currentG}`);
-        this.bText.setText(`B: ${currentB}`);
+        // Reposition and color other handles depending on mode
+        this.handles[1].setVisible(false);
+        this.handles[2].setVisible(false);
+        this.handles[3].setVisible(false);
 
-        this.drawGuessSwatch(currentR, currentG, currentB);
-        this.drawTargetSwatch();
+        if (gameMode === "complementary") {
+          const oppositeRad = mainRad + Math.PI;
+          this.handles[1].x = centerX + Math.cos(oppositeRad) * 120;
+          this.handles[1].y = centerY + Math.sin(oppositeRad) * 120;
+          const otherHue = (this.currentHue + 180) % 360;
+          this.handles[1].setFillStyle(Phaser.Display.Color.HSVToRGB(otherHue / 360, 1, 1).color, 1);
+          this.handles[1].setVisible(true);
+        } else if (gameMode === "analogous") {
+          const lRad = mainRad - Phaser.Math.DegToRad(30);
+          const rRad = mainRad + Phaser.Math.DegToRad(30);
+          
+          this.handles[1].x = centerX + Math.cos(lRad) * 120;
+          this.handles[1].y = centerY + Math.sin(lRad) * 120;
+          const lHue = (this.currentHue - 30 + 360) % 360;
+          this.handles[1].setFillStyle(Phaser.Display.Color.HSVToRGB(lHue / 360, 1, 1).color, 1);
+          this.handles[1].setVisible(true);
+
+          this.handles[2].x = centerX + Math.cos(rRad) * 120;
+          this.handles[2].y = centerY + Math.sin(rRad) * 120;
+          const rHue = (this.currentHue + 30) % 360;
+          this.handles[2].setFillStyle(Phaser.Display.Color.HSVToRGB(rHue / 360, 1, 1).color, 1);
+          this.handles[2].setVisible(true);
+        } else if (gameMode === "triadic") {
+          const rad1 = mainRad + Phaser.Math.DegToRad(120);
+          const rad2 = mainRad + Phaser.Math.DegToRad(240);
+
+          this.handles[1].x = centerX + Math.cos(rad1) * 120;
+          this.handles[1].y = centerY + Math.sin(rad1) * 120;
+          const hue1 = (this.currentHue + 120) % 360;
+          this.handles[1].setFillStyle(Phaser.Display.Color.HSVToRGB(hue1 / 360, 1, 1).color, 1);
+          this.handles[1].setVisible(true);
+
+          this.handles[2].x = centerX + Math.cos(rad2) * 120;
+          this.handles[2].y = centerY + Math.sin(rad2) * 120;
+          const hue2 = (this.currentHue + 240) % 360;
+          this.handles[2].setFillStyle(Phaser.Display.Color.HSVToRGB(hue2 / 360, 1, 1).color, 1);
+          this.handles[2].setVisible(true);
+        }
+
+        // Draw the split center circle
+        this.centerDisk.clear();
+        if (targetColor) {
+          const targetColorHex = Phaser.Display.Color.GetColor(targetColor.r, targetColor.g, targetColor.b);
+          // Left side: target
+          this.centerDisk.fillStyle(targetColorHex, 1);
+          this.centerDisk.slice(centerX, centerY, 60, Phaser.Math.DegToRad(270), Phaser.Math.DegToRad(90), true);
+          this.centerDisk.fillPath();
+
+          // Right side: player current
+          const playerColorHex = Phaser.Display.Color.GetColor(currentR, currentG, currentB);
+          this.centerDisk.fillStyle(playerColorHex, 1);
+          this.centerDisk.slice(centerX, centerY, 60, Phaser.Math.DegToRad(270), Phaser.Math.DegToRad(90), false);
+          this.centerDisk.fillPath();
+          
+          // Draw neat outer stroke border
+          const strokeColor = isGameOver ? 0xffaa00 : 0x1a1a1b;
+          this.centerDisk.lineStyle(3, strokeColor, 1);
+          this.centerDisk.strokeCircle(centerX, centerY, 60);
+          
+          // Position target indicators/markers on the rim
+          const targetHSV = Phaser.Display.Color.RGBToHSV(targetColor.r, targetColor.g, targetColor.b);
+          const targetH = targetHSV.h * 360;
+          const targetS = targetHSV.s;
+
+          this.targetMarkers.forEach(m => m.setVisible(false));
+
+          // Marker 0
+          const tRad = Phaser.Math.DegToRad(targetH);
+          const tRadius = gameMode === "saturation" ? (60 + targetS * (135 - 60)) : 120;
+          this.targetMarkers[0].x = centerX + Math.cos(tRad) * tRadius;
+          this.targetMarkers[0].y = centerY + Math.sin(tRad) * tRadius;
+          this.targetMarkers[0].setVisible(isGameOver);
+
+          if (gameMode === "complementary") {
+            const oppRad = tRad + Math.PI;
+            this.targetMarkers[1].x = centerX + Math.cos(oppRad) * 120;
+            this.targetMarkers[1].y = centerY + Math.sin(oppRad) * 120;
+            this.targetMarkers[1].setVisible(isGameOver);
+          } else if (gameMode === "analogous") {
+            const lRad = tRad - Phaser.Math.DegToRad(30);
+            const rRad = tRad + Phaser.Math.DegToRad(30);
+            this.targetMarkers[1].x = centerX + Math.cos(lRad) * 120;
+            this.targetMarkers[1].y = centerY + Math.sin(lRad) * 120;
+            this.targetMarkers[1].setVisible(isGameOver);
+            this.targetMarkers[2].x = centerX + Math.cos(rRad) * 120;
+            this.targetMarkers[2].y = centerY + Math.sin(rRad) * 120;
+            this.targetMarkers[2].setVisible(isGameOver);
+          } else if (gameMode === "triadic") {
+            const rad1 = tRad + Phaser.Math.DegToRad(120);
+            const rad2 = tRad + Phaser.Math.DegToRad(240);
+            this.targetMarkers[1].x = centerX + Math.cos(rad1) * 120;
+            this.targetMarkers[1].y = centerY + Math.sin(rad1) * 120;
+            this.targetMarkers[1].setVisible(isGameOver);
+            this.targetMarkers[2].x = centerX + Math.cos(rad2) * 120;
+            this.targetMarkers[2].y = centerY + Math.sin(rad2) * 120;
+            this.targetMarkers[2].setVisible(isGameOver);
+          }
+        }
+
         this.drawSubmitButton(false);
 
         // Render previous guesses onto the history chips
@@ -482,7 +522,7 @@ export default function ColorPuzzleCanvas({
         } else {
           this.distanceMeterFill.clear();
           this.distanceMeterCursor.setVisible(false);
-          this.distanceLabel.setText("Adjust sliders & submit a guess");
+          this.distanceLabel.setText("Interact with the color wheel & submit a guess!");
           this.distanceLabel.setColor("#64748b");
         }
 
@@ -491,9 +531,7 @@ export default function ColorPuzzleCanvas({
           const didWin = guesses.some(g => g.isCorrect || g.closeness >= 99);
           if (didWin) {
             playSound("win");
-            // Burst particles over target swatch
-            this.particleEmitter.explode(40, 50, 75);
-            this.particleEmitter.explode(40, 240, 75);
+            this.particleEmitter.explode(40, centerX, centerY);
           } else {
             playSound("lose");
           }
@@ -632,7 +670,7 @@ export default function ColorPuzzleCanvas({
         activeScene.onExternalUpdate();
       }
     }
-  }, [guesses, isGameOver, targetColor, currentR, currentG, currentB]);
+  }, [guesses, isGameOver, targetColor, currentR, currentG, currentB, gameMode]);
 
   return (
     <div id="phaser-game-container" className="flex justify-center select-none overflow-hidden rounded-xl">

@@ -13,6 +13,7 @@ export interface LeaderboardEntry {
   streak: number;
   badge: "Gold" | "Silver" | "Bronze" | "Iron" | "";
   date: string;
+  timeSeconds?: number;
 }
 
 export interface CommentEntry {
@@ -47,3 +48,6 @@ export interface LocalGameState {
   hasWon: boolean;
   bestCloseness: number;
 }
+
+export type GameMode = "hue" | "saturation" | "complementary" | "analogous" | "triadic";
+

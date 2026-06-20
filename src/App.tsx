@@ -15,7 +15,7 @@ import {
   VolumeX,
   Sparkles
 } from "lucide-react";
-import { DailyPuzzleContext, GuessResult, RGB, CommentEntry } from "./types";
+import { DailyPuzzleContext, GuessResult, RGB, CommentEntry, GameMode } from "./types";
 import ColorPuzzleCanvas from "./components/ColorPuzzleCanvas";
 import RedditFrame from "./components/RedditFrame";
 import { toggleAudio, playSound } from "./utils/audio";
@@ -62,13 +62,57 @@ export default function App() {
   const [currentG, setCurrentG] = useState(128);
   const [currentB, setCurrentB] = useState(128);
 
-  // 4. Current Day Live Gameplay History
+   // 4. Current Day Live Gameplay History
   const [guesses, setGuesses] = useState<GuessResult[]>([]);
   const [isGameOver, setIsGameOver] = useState(false);
   const [targetColor, setTargetColor] = useState<RGB | null>(null);
   const [activeTab, setActiveTab] = useState<"play" | "leaderboard" | "instructions">("play");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [gameMode, setGameMode] = useState<GameMode>("hue");
+  const [isAutoAdvancing, setIsAutoAdvancing] = useState(false);
+
+  // Completed levels history, timer and overall game finish state
+  const [completedLevels, setCompletedLevels] = useState<{ mode: GameMode; guesses: GuessResult[]; closeness: number }[]>([]);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [isWholeGameFinished, setIsWholeGameFinished] = useState(false);
+
+  const handleModeChange = async (mode: GameMode) => {
+    playSound("click");
+    setGameMode(mode);
+    setIsAutoAdvancing(false);
+    
+    // Clear guesses and fetch a fresh target color for this active mode
+    const newSeed = "game_" + mode + "_" + Math.random().toString(36).substring(2, 10);
+    localStorage.setItem("devvit_color_active_seed", newSeed);
+    
+    setGuesses([]);
+    setIsGameOver(false);
+    setTargetColor(null);
+    setCurrentR(128);
+    setCurrentG(128);
+    setCurrentB(128);
+ 
+    try {
+      const res = await fetch(`/api/target-color?seed=${newSeed}`);
+      if (res.ok) {
+        const colorData = await res.json();
+        setTargetColor(colorData.targetColor);
+      }
+    } catch (e) {
+      console.error("Failed fetching new target color for mode:", e);
+    }
+  };
+ 
+  const handleNextLevel = () => {
+    setIsAutoAdvancing(false);
+    const modeSequence: GameMode[] = ["hue", "saturation", "complementary", "analogous", "triadic"];
+    const currentIndex = modeSequence.indexOf(gameMode);
+    const nextIndex = (currentIndex + 1) % modeSequence.length;
+    const nextMode = modeSequence[nextIndex];
+    handleModeChange(nextMode);
+  };
 
   // Sound toggle handler
   const handleToggleSound = () => {
@@ -93,8 +137,24 @@ export default function App() {
       setContext(data);
       setCountdown(data.countdown);
 
-      // Restore user gameplay state for *Today* if they already started/finished
-      const savedHistoryJson = localStorage.getItem(`devvit_color_history_${data.date}`);
+      // Check if we have an active seed in local storage
+      let activeSeed = localStorage.getItem("devvit_color_active_seed");
+      if (!activeSeed) {
+        // If not, generate a random one for Hue mode
+        activeSeed = "game_hue_" + Math.random().toString(36).substring(2, 10);
+        localStorage.setItem("devvit_color_active_seed", activeSeed);
+      }
+
+      // Determine game mode from the restored activeSeed
+      let parsedMode: GameMode = "hue";
+      if (activeSeed.includes("saturation")) parsedMode = "saturation";
+      else if (activeSeed.includes("complementary")) parsedMode = "complementary";
+      else if (activeSeed.includes("analogous")) parsedMode = "analogous";
+      else if (activeSeed.includes("triadic")) parsedMode = "triadic";
+      setGameMode(parsedMode);
+
+      // Restore user gameplay state for this active seed if they already started/finished
+      const savedHistoryJson = localStorage.getItem(`devvit_color_history_${activeSeed}`);
       if (savedHistoryJson) {
         const savedHistory = JSON.parse(savedHistoryJson);
         setGuesses(savedHistory.guesses || []);
@@ -117,6 +177,18 @@ export default function App() {
         setCurrentG(128);
         setCurrentB(128);
       }
+
+      // Always fetch the target color so the user can see it!
+      try {
+        const resColor = await fetch(`/api/target-color?seed=${activeSeed}`);
+        if (resColor.ok) {
+          const colorData = await resColor.json();
+          setTargetColor(colorData.targetColor);
+        }
+      } catch (err) {
+        console.error("Failed to load target color:", err);
+      }
+
       setLoading(false);
     } catch (e) {
       console.error("Failed loading daily applets context:", e);
@@ -146,6 +218,50 @@ export default function App() {
     return () => clearInterval(interval);
   }, [countdown, fetchGameContext]);
 
+  // Manage stopwatch and timer running flags
+  useEffect(() => {
+    if (activeTab === "play" && !isWholeGameFinished && !loading) {
+      setIsTimerRunning(true);
+    } else {
+      setIsTimerRunning(false);
+    }
+  }, [activeTab, isWholeGameFinished, loading]);
+
+  useEffect(() => {
+    let timerID: NodeJS.Timeout | null = null;
+    if (isTimerRunning) {
+      timerID = setInterval(() => {
+        setElapsedTime((prev) => prev + 1);
+      }, 1000);
+    }
+    return () => {
+      if (timerID) clearInterval(timerID);
+    };
+  }, [isTimerRunning]);
+
+  // Auto-advance to the next level when a level finishes (game over)
+  useEffect(() => {
+    if (isGameOver && guesses.length > 0) {
+      if (gameMode === "triadic") {
+        setIsWholeGameFinished(true);
+        setIsTimerRunning(false);
+        setIsAutoAdvancing(false);
+        return;
+      }
+      setIsAutoAdvancing(true);
+      const timer = setTimeout(() => {
+        setIsAutoAdvancing(false);
+        handleNextLevel();
+      }, 3000); // give them 3s to read accuracy or see the solution markers!
+      return () => {
+        clearTimeout(timer);
+        setIsAutoAdvancing(false);
+      };
+    } else {
+      setIsAutoAdvancing(false);
+    }
+  }, [isGameOver, guesses.length, gameMode]);
+
   const formatCountdown = (totalSeconds: number) => {
     const hours = Math.floor(totalSeconds / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -162,10 +278,100 @@ export default function App() {
     setCurrentB(b);
   };
 
+  // Submit aggregate multi-level scorecard & time to global leaderboards
+  const handleSubmitOverallScore = async () => {
+    if (!context || completedLevels.length === 0) return;
+    setIsSubmitting(true);
+
+    const avgCloseness = completedLevels.reduce((sum, cl) => sum + cl.closeness, 0) / completedLevels.length;
+    const totalGuesses = completedLevels.reduce((sum, cl) => sum + cl.guesses.length, 0);
+
+    try {
+      const res = await fetch("/api/submit-score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username,
+          closeness: Number(avgCloseness.toFixed(1)),
+          guesses: totalGuesses,
+          streak,
+          timeSeconds: elapsedTime,
+        }),
+      });
+
+      if (res.ok) {
+        const scoreData = await res.json();
+        setContext((prev) => prev ? { ...prev, leaderboard: scoreData.leaderboard } : null);
+        setActiveTab("leaderboard");
+      }
+    } catch (e) {
+      console.error("Failed submitting overall score:", e);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Reset the full 5-level ritual sequence with a clean timer and records
+  const handleResetFullRitual = async () => {
+    playSound("click");
+    setCompletedLevels([]);
+    setElapsedTime(0);
+    setIsWholeGameFinished(false);
+    setIsAutoAdvancing(false);
+    setGameMode("hue");
+
+    const newSeed = "game_hue_" + Math.random().toString(36).substring(2, 10);
+    localStorage.setItem("devvit_color_active_seed", newSeed);
+
+    setGuesses([]);
+    setIsGameOver(false);
+    setTargetColor(null);
+    setCurrentR(128);
+    setCurrentG(128);
+    setCurrentB(128);
+
+    try {
+      const res = await fetch(`/api/target-color?seed=${newSeed}`);
+      if (res.ok) {
+        const colorData = await res.json();
+        setTargetColor(colorData.targetColor);
+      }
+    } catch (e) {
+      console.error("Failed fetching initial color for reset:", e);
+    }
+  };
+
+  // Restart the game with a brand new random seed and allow consecutive games
+  const handlePlayAgain = async () => {
+    playSound("click");
+    setIsAutoAdvancing(false);
+    const newSeed = "game_" + gameMode + "_" + Math.random().toString(36).substring(2, 10);
+    localStorage.setItem("devvit_color_active_seed", newSeed);
+    
+    setGuesses([]);
+    setIsGameOver(false);
+    setTargetColor(null);
+    setCurrentR(128);
+    setCurrentG(128);
+    setCurrentB(128);
+
+    try {
+      const res = await fetch(`/api/target-color?seed=${newSeed}`);
+      if (res.ok) {
+        const colorData = await res.json();
+        setTargetColor(colorData.targetColor);
+      }
+    } catch (e) {
+      console.error("Failed fetching new target color:", e);
+    }
+  };
+
   // Submit and evaluate user's RGB guess
   const handleGuessSubmit = async () => {
     if (isGameOver || isSubmitting || !context) return;
     setIsSubmitting(true);
+
+    const activeSeed = localStorage.getItem("devvit_color_active_seed") || context.date;
 
     try {
       const res = await fetch("/api/guess", {
@@ -176,6 +382,9 @@ export default function App() {
           g: currentG,
           b: currentB,
           guessesCount: guesses.length,
+          seed: activeSeed,
+          maxGuesses: 3,
+          gameMode,
         }),
       });
 
@@ -227,7 +436,7 @@ export default function App() {
 
         // Save progress details to local cache
         localStorage.setItem(
-          `devvit_color_history_${context.date}`,
+          `devvit_color_history_${activeSeed}`,
           JSON.stringify({
             guesses: updatedGuesses,
             isGameOver: true,
@@ -235,27 +444,29 @@ export default function App() {
           })
         );
 
-        // Secure submission of final score to server board
         const bestEvaluatedCloseness = Math.max(...updatedGuesses.map((g) => g.closeness));
-        const finalSubmitRes = await fetch("/api/submit-score", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            username: username,
-            closeness: bestEvaluatedCloseness,
-            guesses: updatedGuesses.length,
-            streak: finalStreak,
-          }),
+        
+        // Append current level to the list of completed levels in this full sequence
+        setCompletedLevels((prev) => {
+          const clean = prev.filter((cl) => cl.mode !== gameMode);
+          return [
+            ...clean,
+            {
+              mode: gameMode,
+              guesses: updatedGuesses,
+              closeness: bestEvaluatedCloseness,
+            },
+          ];
         });
 
-        if (finalSubmitRes.ok) {
-          const scoreData = await finalSubmitRes.json();
-          setContext((prev) => prev ? { ...prev, leaderboard: scoreData.leaderboard } : null);
+        if (gameMode === "triadic") {
+          setIsWholeGameFinished(true);
+          setIsTimerRunning(false);
         }
       } else {
         // Non-terminal state caching
         localStorage.setItem(
-          `devvit_color_history_${context.date}`,
+          `devvit_color_history_${activeSeed}`,
           JSON.stringify({
             guesses: updatedGuesses,
             isGameOver: false,
@@ -326,10 +537,10 @@ export default function App() {
       return "🟥"; // red
     }).join("");
 
-    const filler = Array(5 - guesses.length).fill("⬛").join("");
+    const filler = Array(3 - guesses.length).fill("⬛").join("");
     const gridRow = emojiMap + filler;
 
-    return `🎨 Daily Color Match - ${context.date}\nAccuracy: ${bestCloseness}%\nGuesses: ${guesses.length}/5\nResults: ${gridRow}\nStreak: 🔥 ${streak} days\nPlayed on r/ColorDaily (Phaser 3 Devvit!)`;
+    return `🎨 Daily Color Match - ${context.date}\nAccuracy: ${bestCloseness}%\nGuesses: ${guesses.length}/3\nResults: ${gridRow}\nStreak: 🔥 ${streak} days\nPlayed on r/ColorDaily (Phaser 3 Devvit!)`;
   };
 
   return (
@@ -411,15 +622,24 @@ export default function App() {
           </div>
         </div>
 
-        {/* HUD Sub-banner: Next puzzle timer & state information */}
+        {/* HUD Sub-banner: Next puzzle timer, Level, and active Stopwatch */}
         <div className="bg-[#030303] px-4 py-2 border-b border-[#1a1a1b] flex justify-between items-center flex-wrap gap-2">
-          <div className="flex items-center gap-1.5 text-xs text-gray-450 font-mono">
-            <Clock size={12} className="text-[#ff4500]" />
-            <span>MIDNIGHT UTC REFRESH:</span>
+          <div className="flex items-center gap-1.5 text-xs text-gray-400 font-mono">
+            <span className="text-[#ff452b] font-bold">🎯</span>
+            <span className="font-bold text-gray-200">
+              {isWholeGameFinished ? "RITUAL COMPLETED!" : `LEVEL ${completedLevels.length + 1}/5: ${gameMode.toUpperCase()}`}
+            </span>
           </div>
 
-          <div className="flex items-center gap-1 bg-[#ff4500]/10 border border-[#ff4500]/20 rounded px-2 py-0.5">
-            <span className="text-xs font-bold font-mono tracking-wide text-[#ff4500]">
+          {/* Stopwatch Timer - active running stopwatch indicator */}
+          <div className="flex items-center gap-1.5 bg-green-500/10 border border-green-500/25 px-2.5 py-0.5 rounded text-green-400 text-xs font-mono font-bold animate-pulse">
+            <Clock size={12} className="text-green-400" />
+            <span>ELAPSED TIME: {Math.floor(elapsedTime / 60)}:{(elapsedTime % 60).toString().padStart(2, "0")}</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-amber-500/10 border border-amber-500/25 rounded px-2.5 py-0.5">
+            <span className="text-[10px] text-amber-500 font-mono font-bold">RESET:</span>
+            <span className="text-xs font-bold font-mono tracking-wide text-amber-400">
               {formatCountdown(countdown)}
             </span>
           </div>
@@ -492,103 +712,264 @@ export default function App() {
                   className="flex flex-col gap-4"
                 >
                   
-                  {/* Informative top overlay state when finished */}
-                  {isGameOver && (
+                  {isWholeGameFinished ? (
                     <motion.div
                       initial={{ scale: 0.95, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
-                      className="bg-[#1a1a1b]/60 rounded-xl p-4 border border-[#ff4500]/25 shadow-lg flex flex-col gap-3 relative overflow-hidden"
+                      className="bg-[#1a1a1b] rounded-2xl p-6 border-2 border-green-500/30 shadow-2xl flex flex-col gap-6 relative overflow-hidden text-center max-w-lg mx-auto w-full"
                     >
-                      {/* Decorative elements */}
-                      <div className="absolute right-3 top-3 opacity-20 text-[#ff4500]">
-                        <Sparkles size={24} />
+                      {/* Success particle overlay */}
+                      <div className="absolute inset-0 bg-gradient-to-b from-green-500/5 to-transparent pointer-events-none" />
+
+                      <div className="flex flex-col items-center gap-2">
+                        <span className="text-4xl">🏆</span>
+                        <h3 className="font-display font-extrabold text-2xl text-green-400 tracking-tight">
+                          RITUAL COMPLETED!
+                        </h3>
+                        <p className="text-xs text-gray-300 max-w-sm">
+                          You successfully aligned all 5 spectral keys of the color wheel. Your color alignment telemetry reports ready!
+                        </p>
                       </div>
 
-                      <div className="flex items-center gap-2">
-                        <span className="text-xl">🎉</span>
-                        <div className="flex flex-col">
-                          <h4 className="font-display font-bold text-sm text-[#ff4500]">
-                            PUZZLE MATCH FINISHED!
-                          </h4>
-                          <p className="text-xs text-gray-300">
-                            You used {guesses.length}/5 guesses. Your highest match was{" "}
-                            <strong className="text-white">
-                              {Math.max(...guesses.map((g) => g.closeness))}%
-                            </strong>
-                            .
-                          </p>
+                      {/* Metrics grid */}
+                      <div className="grid grid-cols-2 gap-3 mt-2">
+                        <div className="bg-[#030303]/60 p-4 rounded-xl border border-[#272729] flex flex-col items-center">
+                          <span className="text-[10px] text-gray-400 font-mono tracking-wider font-bold">AVG ACCURACY</span>
+                          <span className="text-xl font-extrabold text-white mt-1">
+                            {(completedLevels.reduce((acc, curr) => acc + curr.closeness, 0) / Math.max(1, completedLevels.length)).toFixed(1)}%
+                          </span>
+                        </div>
+
+                        <div className="bg-[#030303]/60 p-4 rounded-xl border border-[#272729] flex flex-col items-center">
+                          <span className="text-[10px] text-gray-400 font-mono tracking-wider font-bold">TOTAL TIME</span>
+                          <span className="text-xl font-extrabold text-white mt-1">
+                            {Math.floor(elapsedTime / 60)}:{(elapsedTime % 60).toString().padStart(2, "0")}
+                          </span>
+                        </div>
+
+                        <div className="bg-[#030303]/60 p-4 rounded-xl border border-[#272729] flex flex-col items-center flex-1">
+                          <span className="text-[10px] text-gray-400 font-mono tracking-wider font-bold">TOTAL GUESSES</span>
+                          <span className="text-xl font-extrabold text-white mt-1">
+                            {completedLevels.reduce((acc, curr) => acc + curr.guesses.length, 0)}/15
+                          </span>
+                        </div>
+
+                        <div className="bg-[#030303]/60 p-4 rounded-xl border border-[#272729] flex flex-col items-center justify-center flex-1">
+                          <span className="text-[10px] text-gray-400 font-mono tracking-wider font-bold">SPEED RATING</span>
+                          <span className="text-[10px] font-extrabold text-green-400 mt-2 bg-green-500/10 px-2.5 py-0.5 rounded border border-green-500/20 font-sans tracking-wide">
+                            {elapsedTime < 60 ? "⚡ LIGHTNING" : elapsedTime < 125 ? "🏃 SWIFT SOLVER" : "🐢 STEADY SYNC"}
+                          </span>
                         </div>
                       </div>
 
-                      {/* Display comparison box */}
-                      {targetColor && (
-                        <div className="grid grid-cols-2 gap-3 bg-[#030303]/60 rounded-lg p-2.5 border border-[#1a1a1b]/65">
-                          <div className="flex flex-col items-center gap-1.5 border-r border-[#1a1a1b]">
-                            <span className="text-[10px] text-gray-400 font-mono">TARGET RGB:</span>
-                            <div className="flex items-center gap-1.5">
-                              <div
-                                className="w-6 h-6 rounded border border-[#1a1a1b]/70"
-                                style={{ backgroundColor: `rgb(${targetColor.r}, ${targetColor.g}, ${targetColor.b})` }}
-                              />
-                              <span className="text-xs text-gray-200 font-mono font-bold">
-                                {targetColor.r}, {targetColor.g}, {targetColor.b}
+                      {/* Detailed level summary list */}
+                      <div className="bg-[#030303]/45 rounded-xl p-3.5 text-left border border-[#272729] flex flex-col gap-2">
+                        <span className="text-[10px] text-[#ff4500] font-mono block font-bold uppercase tracking-wider">Level Performance Breakdown:</span>
+                        <div className="flex flex-col gap-2 text-xs text-gray-300">
+                          {completedLevels.map((lvl, index) => (
+                            <div key={lvl.mode} className="flex justify-between items-center border-b border-[#1a1a1b]/60 pb-1.5 last:border-0 last:pb-0">
+                              <span className="capitalize font-mono font-medium text-gray-400">
+                                {index + 1}. {lvl.mode} Match
                               </span>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-bold text-green-400">{lvl.closeness.toFixed(1)}%</span>
+                                <span className="text-[9px] bg-[#1a1a1b] px-2 py-0.5 rounded text-gray-400 font-mono font-bold">
+                                  {lvl.guesses.length}/3 guesses
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Leaderboard submit CTA */}
+                      <div className="flex flex-col gap-3 p-4 bg-green-500/5 rounded-xl border border-green-500/15">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-gray-400 font-medium">Rank Identity ID:</span>
+                          <span className="font-bold text-white font-mono">{username}</span>
+                        </div>
+                        <button
+                          disabled={isSubmitting}
+                          onClick={handleSubmitOverallScore}
+                          className="py-2.5 bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-bold text-xs rounded-lg shadow-lg transition-colors flex items-center justify-center gap-2 cursor-pointer font-sans"
+                        >
+                          {isSubmitting ? (
+                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            "🚀 RECORD PERFORMANCE TO LEADERBOARDS"
+                          )}
+                        </button>
+                      </div>
+
+                      {/* Restart CTA */}
+                      <div className="flex flex-col gap-1.5 mt-2">
+                        <button
+                          onClick={handleResetFullRitual}
+                          className="py-2.5 bg-[#ff4500] hover:bg-[#ff5722] text-white font-bold text-xs rounded-lg transition-all shadow cursor-pointer font-sans"
+                        >
+                          🔄 RESTART RITUAL & RESET TIMERS
+                        </button>
+                        <span className="text-[9px] text-gray-400 font-mono font-medium">
+                          r/ColorDaily • Match spectral frequencies
+                        </span>
+                      </div>
+                    </motion.div>
+                  ) : (
+                    <>
+                      {/* BEAUTIFUL METHOD COLOR GAME MODES */}
+                      <div className="bg-[#1a1a1b]/60 p-1.5 rounded-xl border border-[#272729] flex flex-wrap gap-1">
+                        {[
+                          { mode: "hue", label: "🎨 Hue", desc: "Angle" },
+                          { mode: "saturation", label: "🌈 Saturation", desc: "Angle & radius" },
+                          { mode: "complementary", label: "☯️ Complementary", desc: "Opposite colors" },
+                          { mode: "analogous", label: "🌸 Analogous", desc: "Neighbor shades" },
+                          { mode: "triadic", label: "🔺 Triadic", desc: "Three corner mix" }
+                        ].map((item) => (
+                          <button
+                            key={item.mode}
+                            onClick={() => handleModeChange(item.mode as GameMode)}
+                            className={`flex-1 min-w-[90px] py-1.5 px-1 rounded-lg flex flex-col items-center justify-center transition-all ${
+                              gameMode === item.mode
+                                ? "bg-[#ff4500] text-white font-bold shadow-md scale-[1.02]"
+                                : "bg-transparent text-gray-400 hover:text-white hover:bg-[#272729]"
+                            }`}
+                          >
+                            <span className="text-xs font-bold leading-tight">{item.label}</span>
+                            <span className="text-[9px] opacity-75 mt-0.5">{item.desc}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Informative top overlay state when finished */}
+                      {isGameOver && (
+                        <motion.div
+                          initial={{ scale: 0.95, opacity: 0 }}
+                          animate={{ scale: 1, opacity: 1 }}
+                          className="bg-[#1a1a1b]/60 rounded-xl p-4 border border-[#ff4500]/25 shadow-lg flex flex-col gap-3 relative overflow-hidden"
+                        >
+                          {/* Decorative elements */}
+                          <div className="absolute right-3 top-3 opacity-20 text-[#ff4500]">
+                            <Sparkles size={24} />
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="text-xl">🎉</span>
+                            <div className="flex flex-col">
+                              <h4 className="font-display font-bold text-sm text-[#ff4500]">
+                                LEVEL MATCH FINISHED!
+                              </h4>
+                              <p className="text-xs text-gray-300">
+                                You used {guesses.length}/3 guesses on Level {gameMode === "hue" ? 1 : gameMode === "saturation" ? 2 : gameMode === "complementary" ? 3 : gameMode === "analogous" ? 4 : 5}.
+                                Your highest match was{" "}
+                                <strong className="text-white">
+                                  {guesses.length > 0 ? Math.max(...guesses.map((g) => g.closeness)) : 0}%
+                                </strong>
+                                .
+                              </p>
+                              {isAutoAdvancing && (
+                                <div className="mt-1.5 text-[11px] text-green-400 font-bold bg-green-500/10 border border-green-500/20 rounded px-2 py-0.5 max-w-max flex items-center gap-1.5 animate-pulse">
+                                  <span>🔮 Auto-advancing level in 3 seconds...</span>
+                                </div>
+                              )}
                             </div>
                           </div>
 
-                          <div className="flex flex-col items-center gap-1.5">
-                            <span className="text-[10px] text-gray-400 font-mono">YOUR CLOSEST:</span>
-                            {guesses.length > 0 && (
-                              <div className="flex items-center gap-1.5">
-                                <div
-                                  className="w-6 h-6 rounded border border-[#1a1a1b]/70"
-                                  style={{
-                                    backgroundColor: `rgb(${
-                                      guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.r
-                                    }, ${
-                                      guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.g
-                                    }, ${
-                                      guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.b
-                                    })`,
-                                  }}
-                                />
-                                <span className="text-xs text-gray-200 font-mono font-bold">
-                                  {guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.r},{" "}
-                                  {guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.g},{" "}
-                                  {guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.b}
-                                </span>
+                          {/* Display comparison box */}
+                          {targetColor && (
+                            <div className="grid grid-cols-2 gap-3 bg-[#030303]/60 rounded-lg p-2.5 border border-[#1a1a1b]/65">
+                              <div className="flex flex-col items-center gap-1.5 border-r border-[#1a1a1b]">
+                                <span className="text-[10px] text-gray-400 font-mono">TARGET RGB:</span>
+                                <div className="flex items-center gap-1.5">
+                                  <div
+                                    className="w-6 h-6 rounded border border-[#1a1a1b]/70"
+                                    style={{ backgroundColor: `rgb(${targetColor.r}, ${targetColor.g}, ${targetColor.b})` }}
+                                  />
+                                  <span className="text-xs text-gray-200 font-mono font-bold">
+                                    {targetColor.r}, {targetColor.g}, {targetColor.b}
+                                  </span>
+                                </div>
                               </div>
-                            )}
+
+                              <div className="flex flex-col items-center gap-1.5">
+                                <span className="text-[10px] text-gray-400 font-mono">YOUR CLOSEST:</span>
+                                {guesses.length > 0 && (
+                                  <div className="flex items-center gap-1.5">
+                                    <div
+                                      className="w-6 h-6 rounded border border-[#1a1a1b]/70"
+                                      style={{
+                                        backgroundColor: `rgb(${
+                                          guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.r
+                                        }, ${
+                                          guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.g
+                                        }, ${
+                                          guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.b
+                                        })`,
+                                      }}
+                                    />
+                                    <span className="text-xs text-gray-200 font-mono font-bold">
+                                      {guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.r},{" "}
+                                      {guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.g},{" "}
+                                      {guesses.reduce((prev, curr) => (curr.closeness > prev.closeness ? curr : prev)).guessColor.b}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="text-xs text-gray-400 leading-relaxed font-sans select-all p-2.5 bg-[#030303] rounded font-mono border border-[#1a1a1b]/65 text-center relative">
+                            <span className="absolute left-1.5 top-1 text-[9px] text-gray-500 bg-[#09090b] px-1 rounded">Score Grid</span>
+                            {guesses.map((g) => (g.closeness >= 98 ? "🟩" : g.closeness >= 90 ? "🟨" : g.closeness >= 75 ? "🟧" : "🟥")).join("")}
+                            {Array(3 - guesses.length).fill("⬛").join("")}
                           </div>
-                        </div>
+
+                          <div className="flex flex-col gap-2 mt-1">
+                            <button
+                              onClick={handleNextLevel}
+                              className="w-full py-2.5 bg-green-600 hover:bg-green-500 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2 shadow-lg"
+                            >
+                              👉 PROCEED TO NEXT LEVEL (
+                              {gameMode === "hue"
+                                ? "SATURATION"
+                                : gameMode === "saturation"
+                                ? "COMPLEMENTARY"
+                                : gameMode === "complementary"
+                                ? "ANALOGOUS"
+                                : gameMode === "analogous"
+                                ? "TRIADIC"
+                                : "HUE MATCHING"}
+                              ) ➡️
+                            </button>
+                            <button
+                              onClick={handlePlayAgain}
+                              className="w-full py-2 bg-[#ff4500]/10 hover:bg-[#ff4500]/20 text-[#ff4500] text-xs font-bold rounded-lg border border-[#ff4500]/30 transition-colors flex items-center justify-center gap-2"
+                            >
+                              🔄 REPLAY CURRENT LEVEL
+                            </button>
+                            <p className="text-[11px] text-gray-400 text-center">
+                              🎮 Sandbox mode active: Play as many matches as you like! Next daily reset in{" "}
+                              <strong className="text-[#ff4500]">{formatCountdown(countdown)}</strong>.
+                            </p>
+                          </div>
+                        </motion.div>
                       )}
 
-                      <div className="text-xs text-gray-400 leading-relaxed font-sans select-all p-2.5 bg-[#030303] rounded font-mono border border-[#1a1a1b]/65 text-center relative">
-                        <span className="absolute left-1.5 top-1 text-[9px] text-gray-500 bg-[#09090b] px-1 rounded">Score Grid</span>
-                        {guesses.map((g) => (g.closeness >= 98 ? "🟩" : g.closeness >= 90 ? "🟨" : g.closeness >= 75 ? "🟧" : "🟥")).join("")}
-                        {Array(5 - guesses.length).fill("⬛").join("")}
-                      </div>
-
-                      <p className="text-[11px] text-gray-400 text-center mt-1">
-                        🔒 One game per day limits cheating! Next puzzle resets in{" "}
-                        <strong className="text-[#ff4500]">{formatCountdown(countdown)}</strong>.
-                      </p>
-                    </motion.div>
+                      {/* Phaser 3 interactive drawing Area */}
+                      <ColorPuzzleCanvas
+                        guesses={guesses}
+                        maxGuesses={3}
+                        isGameOver={isGameOver}
+                        targetColor={targetColor}
+                        currentR={currentR}
+                        currentG={currentG}
+                        currentB={currentB}
+                        gameMode={gameMode}
+                        onColorChange={handleColorChange}
+                        onGuessSubmitted={handleGuessSubmit}
+                        isSoundEnabled={isSoundEnabled}
+                      />
+                    </>
                   )}
-
-                  {/* Phaser 3 interactive drawing Area */}
-                  <ColorPuzzleCanvas
-                    guesses={guesses}
-                    maxGuesses={5}
-                    isGameOver={isGameOver}
-                    targetColor={targetColor}
-                    currentR={currentR}
-                    currentG={currentG}
-                    currentB={currentB}
-                    onColorChange={handleColorChange}
-                    onGuessSubmitted={handleGuessSubmit}
-                    isSoundEnabled={isSoundEnabled}
-                  />
                   
                 </motion.div>
               )}
@@ -623,6 +1004,7 @@ export default function App() {
                           <th className="py-2.5 px-3">REDDITOR</th>
                           <th className="py-2.5 px-3 text-center">ACCURACY</th>
                           <th className="py-2.5 px-3 text-center">GUESSES</th>
+                          <th className="py-2.5 px-3 text-center">TIME</th>
                           <th className="py-2.5 px-2 text-center">STREAK</th>
                         </tr>
                       </thead>
@@ -630,7 +1012,12 @@ export default function App() {
                         {context && context.leaderboard && context.leaderboard.length > 0 ? (
                           context.leaderboard.map((entry, index) => {
                             const isMe = entry.username.toLowerCase() === username.toLowerCase();
-                            
+                            const timeStr = entry.timeSeconds !== undefined 
+                              ? (Math.floor(entry.timeSeconds / 60) > 0 
+                                  ? `${Math.floor(entry.timeSeconds / 60)}m ${entry.timeSeconds % 60}s` 
+                                  : `${entry.timeSeconds % 60}s`) 
+                              : "—";
+
                             return (
                               <tr
                                 key={entry.username + index}
@@ -651,7 +1038,10 @@ export default function App() {
                                   {entry.closeness}%
                                 </td>
                                 <td className="py-2.5 px-3 text-center font-mono text-gray-300">
-                                  {entry.guesses}/5
+                                  {entry.guesses}
+                                </td>
+                                <td className="py-2.5 px-3 text-center font-mono font-bold text-green-400">
+                                  {timeStr}
                                 </td>
                                 <td className="py-2.5 px-2 text-center">
                                   <div className="flex items-center justify-center gap-0.5 text-amber-500 font-bold font-mono">
@@ -664,7 +1054,7 @@ export default function App() {
                           })
                         ) : (
                           <tr>
-                            <td colSpan={5} className="py-8 px-3 text-center text-gray-500 font-mono">
+                            <td colSpan={6} className="py-8 px-3 text-center text-gray-500 font-mono">
                               No submissions yet today. Be the first to play!
                             </td>
                           </tr>
@@ -704,7 +1094,7 @@ export default function App() {
 
                   <div className="flex flex-col gap-3">
                     <p>
-                      Welcome to the daily wavelength matching ritual inside Reddit. Your objective is simple: guess the hidden RGB target color using a series of slider test mixes.
+                      Welcome to the color wheel matching ritual on Reddit! Your objective is to match the target color shown in the center split-disc using interactive color wheel controls.
                     </p>
 
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
@@ -712,9 +1102,9 @@ export default function App() {
                       <div className="bg-[#030303]/40 p-3 rounded-xl border border-[#1a1a1b] flex gap-2">
                         <span className="text-lg">🎯</span>
                         <div className="flex flex-col">
-                          <span className="font-bold text-gray-200 text-xs">One Puzzle Daily</span>
+                          <span className="font-bold text-gray-200 text-xs">Progression Mode</span>
                           <span className="text-gray-400 text-[11px] mt-0.5">
-                            A single secret color is generated securely on the server daily at midnight UTC. All Reddit players face the same color!
+                            Play through Hue, Saturation, Complementary, Analogous, and Triadic challenges! Auto-advances when finished.
                           </span>
                         </div>
                       </div>
@@ -722,9 +1112,9 @@ export default function App() {
                       <div className="bg-[#030303]/40 p-3 rounded-xl border border-[#1a1a1b] flex gap-2">
                         <span className="text-lg">🎚️</span>
                         <div className="flex flex-col">
-                          <span className="font-bold text-gray-200 text-xs">RGB Mixing Control</span>
+                          <span className="font-bold text-gray-200 text-xs">Color Wheel Matching</span>
                           <span className="text-gray-400 text-[11px] mt-0.5">
-                            Drag the Red, Green, and Blue sliders to match. The color previews represent yours (YOUR MIX) vs the target.
+                            Drag the white handle around the color wheel to match the visual tone. Keep an eye on the split-disc preview in the middle!
                           </span>
                         </div>
                       </div>
@@ -732,9 +1122,9 @@ export default function App() {
                       <div className="bg-[#030303]/40 p-3 rounded-xl border border-[#1a1a1b] flex gap-2">
                         <span className="text-lg">📊</span>
                         <div className="flex flex-col">
-                          <span className="font-bold text-gray-250 text-xs">5 Precious Attempts</span>
+                          <span className="font-bold text-gray-250 text-xs">3 Attempts Per Level</span>
                           <span className="text-gray-400 text-[11px] mt-0.5">
-                            Each guess evaluated for distance. The glow-filled sensor bar shows if you are Freezing Cold or getting Warmer.
+                            You get 3 tries to achieve 100% closeness. When tries are exhausted or matched, the level automatically advances!
                           </span>
                         </div>
                       </div>
@@ -742,9 +1132,9 @@ export default function App() {
                       <div className="bg-[#030303]/40 p-3 rounded-xl border border-[#1a1a1b] flex gap-2">
                         <span className="text-lg">🔥</span>
                         <div className="flex flex-col">
-                          <span className="font-bold text-gray-200 text-xs">Daily Streaks</span>
+                          <span className="font-bold text-gray-200 text-xs">Global Leaderboards</span>
                           <span className="text-gray-400 text-[11px] mt-0.5">
-                            Earn 95%+ accuracy to update your highscore and extend your play streak. Skip a day and streak resets to zero!
+                            Achieve high accuracy to post your record scoreboard, secure active streaks, and lock in Weekly Reddit Badge spots!
                           </span>
                         </div>
                       </div>
