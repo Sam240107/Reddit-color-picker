@@ -30,6 +30,136 @@ function generateRandomUsername(): string {
   return `u/${adj}${noun}_${num}`;
 }
 
+// --- Deterministic Client-Side Fallback Mechanics ---
+const LOCAL_LEADERBOARD_KEY = "devvit_color_local_leaderboard";
+const DEFAULT_CLIENT_LEADERBOARD = [
+  { username: "u/PixelChef", closeness: 99.6, guesses: 2, points: 9960, streak: 15, badge: "Gold" as const, date: "" },
+  { username: "u/ChromaConnoisseur", closeness: 98.9, guesses: 3, points: 9890, streak: 8, badge: "Silver" as const, date: "" },
+  { username: "u/VectorViper", closeness: 98.1, guesses: 4, points: 9810, streak: 5, badge: "Bronze" as const, date: "" },
+  { username: "u/PhaserFanatic", closeness: 97.4, guesses: 3, points: 9740, streak: 12, badge: "Iron" as const, date: "" },
+  { username: "u/RedditSnoo33", closeness: 95.8, guesses: 4, points: 9580, streak: 3, badge: "" as const, date: "" },
+  { username: "u/ColorSeeker", closeness: 94.2, guesses: 5, points: 9420, streak: 2, badge: "" as const, date: "" },
+  { username: "u/HueHero", closeness: 91.5, guesses: 5, points: 9150, streak: 1, badge: "" as const, date: "" }
+];
+
+const DEFAULT_CLIENT_COMMENTS = [
+  { id: "c1", username: "u/PixelChef", text: "Wow, today's color has a subtle green tint that is tricky! Got 99.6% closeness on my second guess by luck. 🟩🔥", timeAgo: "2 hours ago", ups: 14, badge: "Gold" },
+  { id: "c2", username: "u/ChromaConnoisseur", text: "Got 98.9%! Color matching on mobile with fingers worked surprisingly well. Love the Phaser canvas drag control.", timeAgo: "4 hours ago", ups: 9, badge: "Silver" },
+  { id: "c3", username: "u/SnooDoodles", text: "Next puzzle in 14 hours? I am definitely returning tomorrow, my 6-day streak depends on it!", timeAgo: "5 hours ago", ups: 7 },
+  { id: "c4", username: "u/PhaserFanatic", text: "Finally a Devvit game with solid polish. Phaser rendering makes the color picker transition super smooth.", timeAgo: "6 hours ago", ups: 5, badge: "Iron" }
+];
+
+function getTodayUTCStringClient(): string {
+  const now = new Date();
+  return now.toISOString().split("T")[0]; // YYYY-MM-DD
+}
+
+function getDailyColorClient(dateStr: string): RGB {
+  let hash = 0;
+  for (let i = 0; i < dateStr.length; i++) {
+    hash = (hash << 5) - hash + dateStr.charCodeAt(i);
+    hash |= 0;
+  }
+  const r = Math.abs((hash ^ 0x123456) % 256);
+  const g = Math.abs(((hash >> 8) ^ 0x654321) % 256);
+  const b = Math.abs(((hash >> 16) ^ 0xabcdef) % 256);
+  return { r, g, b };
+}
+
+function rgbToHsvClient(r: number, g: number, b: number) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const v = max;
+  const d = max - min;
+  s = max === 0 ? 0 : d / max;
+  if (max !== min) {
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return { h: h * 360, s, v };
+}
+
+function hsvToRgbClient(h: number, s: number, v: number): RGB {
+  h /= 360;
+  let r = 0, g = 0, b = 0;
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    case 5: r = v; g = p; b = q; break;
+  }
+  return {
+    r: Math.round(r * 255),
+    g: Math.round(g * 255),
+    b: Math.round(b * 255)
+  };
+}
+
+function normalizeColorForModeClient(color: RGB, mode: string): RGB {
+  const hsv = rgbToHsvClient(color.r, color.g, color.b);
+  if (mode === "saturation") {
+    return hsvToRgbClient(hsv.h, hsv.s, 1.0);
+  } else {
+    return hsvToRgbClient(hsv.h, 1.0, 1.0);
+  }
+}
+
+function evaluateGuessClient(r: number, g: number, b: number, guessesCount: number, seed: string, maxGuesses: number, gameMode: string) {
+  const baseTarget = getDailyColorClient(seed);
+  
+  // Parse/Determine mode
+  let mode = gameMode;
+  if (!mode && typeof seed === "string") {
+    if (seed.includes("saturation")) mode = "saturation";
+    else if (seed.includes("complementary")) mode = "complementary";
+    else if (seed.includes("analogous")) mode = "analogous";
+    else if (seed.includes("triadic")) mode = "triadic";
+  }
+  if (!mode) mode = "hue";
+
+  const userGuess = normalizeColorForModeClient({ r, g, b }, mode);
+  const target = normalizeColorForModeClient(baseTarget, mode);
+
+  const dr = userGuess.r - target.r;
+  const dg = userGuess.g - target.g;
+  const db = userGuess.b - target.b;
+  const distance = Math.sqrt(dr * dr + dg * dg + db * db);
+
+  const maxDist = 441.67;
+  let closeness = Math.max(0, Number((100 - (distance / maxDist) * 100).toFixed(1)));
+  if (closeness >= 99.0) {
+    closeness = 100.0;
+  }
+
+  const isCorrect = distance < 8;
+  const limit = maxGuesses || 3;
+  const isGameOver = isCorrect || guessesCount >= (limit - 1);
+
+  return {
+    distance: Math.round(distance),
+    closeness,
+    isCorrect,
+    isGameOver,
+    targetColor: target
+  };
+}
+
 export default function App() {
   // 1. Base User Settings & Preferences
   const [username, setUsername] = useState<string>(() => {
@@ -99,9 +229,14 @@ export default function App() {
       if (res.ok) {
         const colorData = await res.json();
         setTargetColor(colorData.targetColor);
+      } else {
+        throw new Error("Target-color API call returned non-OK status");
       }
     } catch (e) {
-      console.error("Failed fetching new target color for mode:", e);
+      console.warn("Express backend server `/api/target-color` is offline (Vercel deployment setup). Generating target color coordinates client-side.", e);
+      const baseTarget = getDailyColorClient(newSeed);
+      const target = normalizeColorForModeClient(baseTarget, mode);
+      setTargetColor(target);
     }
   };
  
@@ -130,70 +265,109 @@ export default function App() {
 
   // Fetch puzzle, comments, and highscores from Server
   const fetchGameContext = useCallback(async () => {
+    let clientFallbackNeeded = false;
+    let data: DailyPuzzleContext | null = null;
+    const today = getTodayUTCStringClient();
+
     try {
       const res = await fetch("/api/game-context");
       if (!res.ok) throw new Error("Faulty network response");
-      const data: DailyPuzzleContext = await res.json();
-      setContext(data);
-      setCountdown(data.countdown);
-
-      // Check if we have an active seed in local storage
-      let activeSeed = localStorage.getItem("devvit_color_active_seed");
-      if (!activeSeed) {
-        // If not, generate a random one for Hue mode
-        activeSeed = "game_hue_" + Math.random().toString(36).substring(2, 10);
-        localStorage.setItem("devvit_color_active_seed", activeSeed);
-      }
-
-      // Determine game mode from the restored activeSeed
-      let parsedMode: GameMode = "hue";
-      if (activeSeed.includes("saturation")) parsedMode = "saturation";
-      else if (activeSeed.includes("complementary")) parsedMode = "complementary";
-      else if (activeSeed.includes("analogous")) parsedMode = "analogous";
-      else if (activeSeed.includes("triadic")) parsedMode = "triadic";
-      setGameMode(parsedMode);
-
-      // Restore user gameplay state for this active seed if they already started/finished
-      const savedHistoryJson = localStorage.getItem(`devvit_color_history_${activeSeed}`);
-      if (savedHistoryJson) {
-        const savedHistory = JSON.parse(savedHistoryJson);
-        setGuesses(savedHistory.guesses || []);
-        setIsGameOver(savedHistory.isGameOver || false);
-        setTargetColor(savedHistory.targetColor || null);
-        
-        // Pick up where they left off
-        if (savedHistory.guesses && savedHistory.guesses.length > 0) {
-          const lastGuess = savedHistory.guesses[savedHistory.guesses.length - 1].guessColor;
-          setCurrentR(lastGuess.r);
-          setCurrentG(lastGuess.g);
-          setCurrentB(lastGuess.b);
-        }
-      } else {
-        // Fresh state resetting
-        setGuesses([]);
-        setIsGameOver(false);
-        setTargetColor(null);
-        setCurrentR(128);
-        setCurrentG(128);
-        setCurrentB(128);
-      }
-
-      // Always fetch the target color so the user can see it!
-      try {
-        const resColor = await fetch(`/api/target-color?seed=${activeSeed}`);
-        if (resColor.ok) {
-          const colorData = await resColor.json();
-          setTargetColor(colorData.targetColor);
-        }
-      } catch (err) {
-        console.error("Failed to load target color:", err);
-      }
-
-      setLoading(false);
+      data = await res.json();
     } catch (e) {
-      console.error("Failed loading daily applets context:", e);
-      setLoading(false);
+      console.warn("Express backend API `/api/game-context` is offline. Initiating seamless client-side state.", e);
+      clientFallbackNeeded = true;
     }
+
+    if (clientFallbackNeeded || !data) {
+      // Calculate seconds left until midnight UTC
+      const now = new Date();
+      const nextMidnight = new Date(Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate() + 1,
+        0, 0, 0, 0
+      ));
+      const countdownSeconds = Math.max(0, Math.floor((nextMidnight.getTime() - now.getTime()) / 1000));
+
+      let localLeaderboard = DEFAULT_CLIENT_LEADERBOARD.map(e => ({ ...e, date: today }));
+      const savedLeaderboardJson = localStorage.getItem(LOCAL_LEADERBOARD_KEY);
+      if (savedLeaderboardJson) {
+        try {
+          localLeaderboard = JSON.parse(savedLeaderboardJson);
+        } catch (_) {}
+      } else {
+        localStorage.setItem(LOCAL_LEADERBOARD_KEY, JSON.stringify(localLeaderboard));
+      }
+
+      data = {
+        date: today,
+        countdown: countdownSeconds,
+        leaderboard: localLeaderboard,
+        comments: DEFAULT_CLIENT_COMMENTS
+      };
+    }
+
+    setContext(data);
+    setCountdown(data.countdown);
+
+    // Check if we have an active seed in local storage
+    let activeSeed = localStorage.getItem("devvit_color_active_seed");
+    if (!activeSeed) {
+      // If not, generate a random one for Hue mode
+      activeSeed = "game_hue_" + Math.random().toString(36).substring(2, 10);
+      localStorage.setItem("devvit_color_active_seed", activeSeed);
+    }
+
+    // Determine game mode from the restored activeSeed
+    let parsedMode: GameMode = "hue";
+    if (activeSeed.includes("saturation")) parsedMode = "saturation";
+    else if (activeSeed.includes("complementary")) parsedMode = "complementary";
+    else if (activeSeed.includes("analogous")) parsedMode = "analogous";
+    else if (activeSeed.includes("triadic")) parsedMode = "triadic";
+    setGameMode(parsedMode);
+
+    // Restore user gameplay state for this active seed if they already started/finished
+    const savedHistoryJson = localStorage.getItem(`devvit_color_history_${activeSeed}`);
+    if (savedHistoryJson) {
+      const savedHistory = JSON.parse(savedHistoryJson);
+      setGuesses(savedHistory.guesses || []);
+      setIsGameOver(savedHistory.isGameOver || false);
+      setTargetColor(savedHistory.targetColor || null);
+      
+      // Pick up where they left off
+      if (savedHistory.guesses && savedHistory.guesses.length > 0) {
+        const lastGuess = savedHistory.guesses[savedHistory.guesses.length - 1].guessColor;
+        setCurrentR(lastGuess.r);
+        setCurrentG(lastGuess.g);
+        setCurrentB(lastGuess.b);
+      }
+    } else {
+      // Fresh state resetting
+      setGuesses([]);
+      setIsGameOver(false);
+      setTargetColor(null);
+      setCurrentR(128);
+      setCurrentG(128);
+      setCurrentB(128);
+    }
+
+    // Always fetch the target color so the user can see it!
+    try {
+      const resColor = await fetch(`/api/target-color?seed=${activeSeed}`);
+      if (resColor.ok) {
+        const colorData = await resColor.json();
+        setTargetColor(colorData.targetColor);
+      } else {
+        throw new Error("Target color API response non-ok");
+      }
+    } catch (err) {
+      console.warn("Falling back to local target color generation for active seed:", activeSeed);
+      const baseTarget = getDailyColorClient(activeSeed);
+      const target = normalizeColorForModeClient(baseTarget, parsedMode);
+      setTargetColor(target);
+    }
+
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -286,22 +460,78 @@ export default function App() {
     const avgCloseness = completedLevels.reduce((sum, cl) => sum + cl.closeness, 0) / completedLevels.length;
     const totalGuesses = completedLevels.reduce((sum, cl) => sum + cl.guesses.length, 0);
 
+    const payload = {
+      username,
+      closeness: Number(avgCloseness.toFixed(1)),
+      guesses: totalGuesses,
+      streak,
+      timeSeconds: elapsedTime,
+    };
+
     try {
-      const res = await fetch("/api/submit-score", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username,
+      let data = null;
+      try {
+        const res = await fetch("/api/submit-score", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          const scoreData = await res.json();
+          data = scoreData.leaderboard;
+        } else {
+          throw new Error("Score submit API returned non-OK status");
+        }
+      } catch (innerError) {
+        console.warn("Submitting score to backend API failed, saving to local simulated leaderboard instead (Vercel deployment setup):", innerError);
+        
+        // Save to browser LocalStorage simulated board
+        const today = getTodayUTCStringClient();
+        let localLeaderboard = DEFAULT_CLIENT_LEADERBOARD.map(e => ({ ...e, date: today }));
+        const savedLeaderboardJson = localStorage.getItem(LOCAL_LEADERBOARD_KEY);
+        if (savedLeaderboardJson) {
+          try {
+            localLeaderboard = JSON.parse(savedLeaderboardJson);
+          } catch (_) {}
+        }
+
+        // Add entry
+        const entry = {
+          username: username.startsWith("u/") ? username : `u/${username}`,
           closeness: Number(avgCloseness.toFixed(1)),
           guesses: totalGuesses,
+          points: Math.round(avgCloseness * 100),
           streak,
-          timeSeconds: elapsedTime,
-        }),
-      });
+          badge: (avgCloseness >= 99.0 ? "Gold" : avgCloseness >= 98.0 ? "Silver" : avgCloseness >= 95.0 ? "Bronze" : avgCloseness >= 90.0 ? "Iron" : "") as "Gold" | "Silver" | "Bronze" | "Iron" | "",
+          date: today,
+          timeSeconds: elapsedTime
+        };
 
-      if (res.ok) {
-        const scoreData = await res.json();
-        setContext((prev) => prev ? { ...prev, leaderboard: scoreData.leaderboard } : null);
+        // Suppress duplicate submissions for this user/date
+        const cleanName = entry.username.toLowerCase();
+        const existingIdx = localLeaderboard.findIndex(e => e.username.toLowerCase() === cleanName && e.date === today);
+        if (existingIdx !== -1) {
+          localLeaderboard[existingIdx] = entry;
+        } else {
+          localLeaderboard.push(entry);
+        }
+
+        // Sort: Points/Closeness DESC, then timeSeconds ASC, then guesses ASC
+        localLeaderboard.sort((a, b) => {
+          if (b.closeness !== a.closeness) return b.closeness - a.closeness;
+          const tA = a.timeSeconds !== undefined ? a.timeSeconds : 999999;
+          const tB = b.timeSeconds !== undefined ? b.timeSeconds : 999999;
+          if (tA !== tB) return tA - tB;
+          return a.guesses - b.guesses;
+        });
+
+        localStorage.setItem(LOCAL_LEADERBOARD_KEY, JSON.stringify(localLeaderboard));
+        data = localLeaderboard;
+      }
+
+      if (data) {
+        setContext((prev) => prev ? { ...prev, leaderboard: data } : null);
         setActiveTab("leaderboard");
       }
     } catch (e) {
@@ -335,9 +565,14 @@ export default function App() {
       if (res.ok) {
         const colorData = await res.json();
         setTargetColor(colorData.targetColor);
+      } else {
+        throw new Error("Target color API return non-OK status");
       }
     } catch (e) {
-      console.error("Failed fetching initial color for reset:", e);
+      console.warn("Failed fetching initial color for reset, generating locally:", e);
+      const baseTarget = getDailyColorClient(newSeed);
+      const target = normalizeColorForModeClient(baseTarget, "hue");
+      setTargetColor(target);
     }
   };
 
@@ -360,9 +595,14 @@ export default function App() {
       if (res.ok) {
         const colorData = await res.json();
         setTargetColor(colorData.targetColor);
+      } else {
+        throw new Error("Target color API returned non-OK status for play again");
       }
     } catch (e) {
-      console.error("Failed fetching new target color:", e);
+      console.warn("Failed fetching new target color, generating locally:", e);
+      const baseTarget = getDailyColorClient(newSeed);
+      const target = normalizeColorForModeClient(baseTarget, gameMode);
+      setTargetColor(target);
     }
   };
 
@@ -374,22 +614,28 @@ export default function App() {
     const activeSeed = localStorage.getItem("devvit_color_active_seed") || context.date;
 
     try {
-      const res = await fetch("/api/guess", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          r: currentR,
-          g: currentG,
-          b: currentB,
-          guessesCount: guesses.length,
-          seed: activeSeed,
-          maxGuesses: 3,
-          gameMode,
-        }),
-      });
+      let evaluation = null;
+      try {
+        const res = await fetch("/api/guess", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            r: currentR,
+            g: currentG,
+            b: currentB,
+            guessesCount: guesses.length,
+            seed: activeSeed,
+            maxGuesses: 3,
+            gameMode,
+          }),
+        });
 
-      if (!res.ok) throw new Error("Evaluation endpoint error");
-      const evaluation = await res.json();
+        if (!res.ok) throw new Error("Evaluation endpoint error");
+        evaluation = await res.json();
+      } catch (innerError) {
+        console.warn("Guess API evaluation failed, falling back to local calculation:", innerError);
+        evaluation = evaluateGuessClient(currentR, currentG, currentB, guesses.length, activeSeed, 3, gameMode);
+      }
 
       const newGuess: GuessResult = {
         guessColor: { r: currentR, g: currentG, b: currentB },
@@ -486,18 +732,35 @@ export default function App() {
     if (!context || !text.trim()) return;
 
     try {
-      const res = await fetch("/api/comment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      try {
+        const res = await fetch("/api/comment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: username,
+            text: text,
+          }),
+        });
+
+        if (res.ok) {
+          const commentData = await res.json();
+          setContext((prev) => prev ? { ...prev, comments: commentData.comments } : null);
+          return;
+        } else {
+          throw new Error("Comment submit API response non-ok");
+        }
+      } catch (innerError) {
+        console.warn("Adding comment to backend API failed, adding locally instead:", innerError);
+        const newComment = {
+          id: "local_c_" + Math.random().toString(36).substring(2, 10),
           username: username,
           text: text,
-        }),
-      });
-
-      if (res.ok) {
-        const commentData = await res.json();
-        setContext((prev) => prev ? { ...prev, comments: commentData.comments } : null);
+          timeAgo: "Just now",
+          ups: 1,
+          badge: (completedLevels.length > 0 ? (completedLevels[0].closeness >= 99.0 ? "Gold" : completedLevels[0].closeness >= 98.0 ? "Silver" : completedLevels[0].closeness >= 95.0 ? "Bronze" : undefined) : undefined),
+          isUser: true,
+        };
+        setContext((prev) => prev ? { ...prev, comments: [newComment, ...prev.comments] } : null);
       }
     } catch (e) {
       console.error("Comment submit error:", e);
